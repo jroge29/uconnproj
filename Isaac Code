@@ -1,0 +1,117 @@
+library(readr)
+library(tidyverse)
+ballinplay <- read_csv("Baseball Stuff/SMT Data Challenge/ballinplay.csv")
+binary2_1 <- read_csv("Baseball Stuff/SMT Data Challenge/binary2.1.csv")
+binary3_1 <- read_csv("Baseball Stuff/SMT Data Challenge/binary3.1.csv")
+
+
+
+creating_a_dist_from_fielder <- function(data){
+
+  #New data frame only containing plays with event codes
+  ballinplay2 <- data %>%
+    mutate(event_code = ifelse(lag(event_code) == "end of play" & is.na(event_code), "ball hit in play", event_code)) %>%
+    filter(!is.na(event_code))
+  
+  #Creating two new columns identifying which fielders I will need to be tracking
+  finding_fielders_helper <- ballinplay2 %>%
+    filter(event_code == "ball hit in play" | event_code == "ball acquired") %>%
+    mutate(fielder = ifelse(event_code == "ball acquired", event_player, NA)) %>%
+    mutate(tracking_fielder = ifelse(event_code == "ball hit in play", lead(fielder), NA))
+  
+  #Creating and editing multiple columns to identify catches, where the ball currently is, 
+  #and the fielders to track during plays
+  finding_fielders <- ballinplay2 %>%
+    mutate(catch = ifelse(event_code == "ball hit in play", ifelse(game_str >= "1901", lead(event_code) == "ball acquired", "unknown"), NA)) %>%
+    mutate(ball_height = ifelse(game_str >= "1901", 
+                                ifelse(event_code == "ball hit in play", "air", 
+                                       ifelse(event_code == "ball bounce", "ground", 
+                                              ifelse(event_code == "end of play", "end", 
+                                                     ifelse(event_code == "pitch", "pitch", 
+                                                            ifelse(event_code == "ball acquired", "fielder has it", NA))))), NA)) %>%
+    mutate(fielder = ifelse(event_code == "ball acquired", event_player, NA)) %>%
+    mutate(tracking_fielder = ifelse(!is.na(fielder), fielder, 
+                                     ifelse(event_code == "end of play", "end", 
+                                            ifelse(event_code == "pitch", "no", 
+                                                   ifelse(event_code == "throw (ball-in-play, unknown field position)", "just ball", NA))))) %>%
+    left_join(finding_fielders_helper[ , c("...1", "tracking_fielder")], by = "...1") %>%
+    mutate(what_to_track = coalesce(tracking_fielder.x, tracking_fielder.y))
+  
+  #Creating a data frame to reconnect back to the original, imported data frame
+  connector <- data.frame(...1 = finding_fielders$...1,
+                          what_to_track = finding_fielders$what_to_track, 
+                          catch = finding_fielders$catch,
+                          ball_height = finding_fielders$ball_height)
+  
+  
+  
+  
+  #Combining all the new columns I just added back in while also filling out
+  #the what_to_track & ball_height columns for easy access later
+  ballinplay_updated <- data %>%
+    mutate(event_code = ifelse(lag(event_code) == "end of play" & is.na(event_code), "ball hit in play", event_code)) %>%
+    left_join(connector, by = c("...1")) %>%
+    fill(what_to_track) %>%
+    fill(ball_height)
+  
+  #Creating new columns for the next ball positions and which fielder position 
+  #data I have to collect
+  fielderplayer_distance <- ballinplay_updated %>%
+    mutate(next_ball_position_x = ifelse(what_to_track == "no" | what_to_track == "end", NA, lead(ball_position_x)),
+           next_ball_position_y = ifelse(what_to_track == "no" | what_to_track == "end", NA, lead(ball_position_y)),
+           next_ball_position_z = ifelse(what_to_track == "no" | what_to_track == "end", NA, lead(ball_position_z)),
+           fielder_col_name_x = ifelse(what_to_track == "no" | what_to_track == "end"| what_to_track == "just ball", NA, 
+                                       paste(tolower(what_to_track), "_field_x", sep = "")),
+           fielder_col_name_y = ifelse(what_to_track == "no" | what_to_track == "end"| what_to_track == "just ball", NA, 
+                                       paste(tolower(what_to_track), "_field_y", sep = "")))
+           
+  #Creating a data frame so that only rows where I need to collect fielder position
+  #data are present
+  fielderplayer_distance_helper <- fielderplayer_distance %>%
+    filter(!is.na(fielder_col_name_x)) %>%
+    mutate(current_fielder_pos_x = NA,
+           current_fielder_pos_y = NA)
+    
+  #A for loop running through the data frame to identify and collect the correct
+  #fielder's position at all times during a play
+  current_fielding_pos_x = c()
+  current_fielding_pos_y = c()
+  for (i in 1:nrow(fielderplayer_distance_helper)){
+    current_fielding_pos_x[i] = (fielderplayer_distance_helper[fielderplayer_distance_helper$fielder_col_name_x[i]])[i,][1]
+    current_fielding_pos_y[i] = (fielderplayer_distance_helper[fielderplayer_distance_helper$fielder_col_name_y[i]])[i,][1]
+  }
+  
+  #Unlisting the newly identified position data so it can be put in a data frame
+  fielderplayer_distance_helper <- fielderplayer_distance_helper %>%
+    mutate(current_fielder_pos_x = as.numeric(unlist(current_fielding_pos_x)),
+           current_fielder_pos_y = as.numeric(unlist(current_fielding_pos_y)))
+  
+  #Creating a data frame to reconnect back to fielderplayer_distance
+  connector2 <- data.frame(...1 = fielderplayer_distance_helper$...1,
+                          current_fielder_pos_x = fielderplayer_distance_helper$current_fielder_pos_x, 
+                          current_fielder_pos_y = fielderplayer_distance_helper$current_fielder_pos_y)
+  
+  #Connecting all of my information together
+  fielderplayer_distance <- fielderplayer_distance %>%
+    left_join(connector2, by = "...1")
+  
+  #Finally finding the distance from the fielder to the ball using the distance formula
+  fielderplayer_distance <- fielderplayer_distance %>%
+    mutate(current_fielding_pos_z = 6,
+           fielder_dist_from_ball = ifelse(is.na(ball_position_x) | is.na(ball_position_y) | 
+                                           is.na(current_fielder_pos_x) | is.na(current_fielder_pos_y), NA, 
+                                           sqrt((ball_position_x-current_fielder_pos_x)^2 + 
+                                           (ball_position_y-current_fielder_pos_y)^2)))
+  
+  #Creating a file and naming it the second version
+  obj_name = deparse(substitute(data))
+  obj_name = substring(obj_name, first = 1, last = 7)
+  obj_name = paste0(obj_name, ".2")
+  
+  write.csv(fielderplayer_distance, file = paste0(obj_name, ".csv"))
+  
+}
+
+
+creating_a_dist_from_fielder(binary2_1)
+creating_a_dist_from_fielder(binary3_1)
